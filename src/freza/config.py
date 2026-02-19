@@ -2,7 +2,7 @@
 
 import os
 import platform
-import shutil
+import sys
 from pathlib import Path
 
 
@@ -57,8 +57,7 @@ class Config:
 
     @property
     def agent_cmd(self) -> str:
-        bin_path = shutil.which("freza") or "freza"
-        return f"{bin_path} --base-dir {self.base_dir}"
+        return f"{sys.executable} -m freza --base-dir {self.base_dir}"
 
     def ensure_dirs(self):
         for d in (

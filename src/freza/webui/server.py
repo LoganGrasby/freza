@@ -317,7 +317,14 @@ class WebUIHandler(BaseHTTPRequestHandler):
             proc_id = f"proc_{_proc_counter}_{int(time.time())}"
 
             proc = AgentProcess(message)
-            proc.start()
+            try:
+                proc.start()
+            except FileNotFoundError as e:
+                self._json_response(
+                    {"error": f"Failed to start agent: {e}. Is freza installed and on PATH?"},
+                    500,
+                )
+                return
             _active_procs[proc_id] = proc
 
             self._json_response({"proc_id": proc_id, "status": "started"})

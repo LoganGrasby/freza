@@ -146,12 +146,24 @@ def _ensure_claude_cli():
         known_paths.append(Path("/usr/local/bin/claude"))
     for p in known_paths:
         if p.exists():
+            os.environ["PATH"] = f"{p.parent}:{os.environ.get('PATH', '')}"
             return
-    print("Claude CLI not found. Installing...")
-    subprocess.run(
-        ["bash", "-c", "curl -fsSL https://claude.ai/install.sh | bash"],
-        check=True,
-    )
+    print("Claude Code CLI not found. Installing...")
+    try:
+        subprocess.run(
+            ["bash", "-c", "curl -fsSL https://claude.ai/install.sh | bash"],
+            check=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        raise RuntimeError(
+            "Failed to install Claude Code CLI. "
+            "Install it manually: https://docs.anthropic.com/en/docs/claude-code"
+        ) from e
+    # Add the newly installed binary to PATH
+    for p in known_paths:
+        if p.exists():
+            os.environ["PATH"] = f"{p.parent}:{os.environ.get('PATH', '')}"
+            return
 
 
 def _atomic_write_log(path: Path, data: dict):
