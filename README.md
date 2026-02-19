@@ -15,7 +15,7 @@ pip install .
 
 ## Quick Start
 
-Initialize a workspace (creates data directories and installs a cron job for periodic reflection):
+Initialize a workspace (creates data directories, installs a cron job for periodic reflection, registers the webui channel, and starts the web UI daemon):
 
 ```bash
 freza init
@@ -33,7 +33,10 @@ freza init --base-dir /path/to/workspace
 freza status                          # show instances, memory, recent logs
 freza reflect                         # trigger a reflection manually
 freza channel <name> "<message>"      # send a message via a channel
-freza webui                           # start the web UI (default: localhost:7888)
+freza webui                           # start the web UI in the foreground
+freza webui --daemon                  # start as a background daemon
+freza webui --status                  # check if the daemon is running
+freza webui --stop                    # stop the daemon
 freza webui --host 0.0.0.0 --port 80  # bind to a different address
 freza register-channel <name> "<desc>" # register a new channel
 freza cleanup                         # prune stale state files
