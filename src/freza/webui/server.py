@@ -137,7 +137,7 @@ class AgentProcess:
         env = os.environ.copy()
         env.pop("CLAUDECODE", None)
 
-        cmd = cfg.agent_cmd.split() + ["channel", "webui", self.message]
+        cmd = cfg.agent_cmd_argv + ["channel", "webui", self.message]
         self.process = subprocess.Popen(
             cmd,
             cwd=str(cfg.base_dir),

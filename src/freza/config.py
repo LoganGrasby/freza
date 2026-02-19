@@ -61,6 +61,10 @@ class Config:
     def agent_cmd(self) -> str:
         return f"{sys.executable} -m freza --base-dir {self.base_dir}"
 
+    @property
+    def agent_cmd_argv(self) -> list[str]:
+        return [sys.executable, "-m", "freza", "--base-dir", str(self.base_dir)]
+
     def ensure_dirs(self):
         for d in (
             self.state_dir,
