@@ -342,7 +342,8 @@ def run(config: Config, host: str = "127.0.0.1", port: int = 7888):
     _config = config
 
     server = ReusableHTTPServer((host, port), WebUIHandler)
-    print(f"Freza Web UI running at http://{host}:{port}")
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{ts}] [PID {os.getpid()}] Freza Web UI running at http://{host}:{port}")
     print(f"  Base dir: {config.base_dir}")
 
     def _shutdown(sig, frame):

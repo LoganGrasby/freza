@@ -46,6 +46,8 @@ class Config:
         self.channels_meta = self.state_dir / "channels.json"
         self.logs_dir = self.state_dir / "logs"
         self.tools_dir = self.base_dir / "tools"
+        self.webui_pid_file = self.state_dir / "webui.pid"
+        self.webui_log_file = self.state_dir / "webui.log"
 
         self.heartbeat_interval = int(os.environ.get("AGENT_HEARTBEAT_SEC", "30"))
         self.stale_threshold = int(os.environ.get("AGENT_STALE_SEC", "300"))

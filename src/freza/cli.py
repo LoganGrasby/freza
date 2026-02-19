@@ -316,10 +316,23 @@ def do_cleanup(config: Config):
 def do_init(config: Config):
     config.initialize()
     do_setup(config)
+
+    # Auto-register the webui channel
+    channels = ChannelManager(config)
+    channels.register("webui", "Web UI chat interface")
+
+    # Auto-start the webui daemon
+    from freza.daemon import daemonize
+    pid = daemonize(config)
+    print(f"\nWebUI daemon started (PID {pid})")
+    print(f"  http://127.0.0.1:7888")
+    print(f"  Log: {config.webui_log_file}")
+
     print(f"\nWorkspace: {config.base_dir}")
     print(f"Cron reflection is active ({config.cron_schedule}).")
     print(f"\nTo interact directly:")
     print(f"  freza channel webui \"hello\"")
+    print(f"  freza webui --status")
     print(f"  freza status")
 
 
@@ -397,6 +410,13 @@ def do_status(config: Config):
     else:
         print("    (none)")
 
+    from freza.daemon import is_running
+    webui_pid = is_running(config)
+    if webui_pid:
+        print(f"\n  WebUI daemon: running (PID {webui_pid})")
+    else:
+        print(f"\n  WebUI daemon: not running")
+
     print(f"\n  Channels: {len(chan_list)}")
     for ch in chan_list:
         print(f"    {ch['name']}: {ch.get('description', '')}")
@@ -458,6 +478,9 @@ Commands:
     ui = sub.add_parser("webui", help="Start the web UI server")
     ui.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1)")
     ui.add_argument("--port", type=int, default=7888, help="Bind port (default: 7888)")
+    ui.add_argument("--daemon", action="store_true", help="Run as background daemon")
+    ui.add_argument("--stop", action="store_true", help="Stop the running daemon")
+    ui.add_argument("--status", action="store_true", help="Check if daemon is running")
 
     sub.add_parser("status", help="Show status")
     sub.add_parser("cleanup", help="Prune stale state")
@@ -477,8 +500,27 @@ Commands:
 
     elif args.command == "webui":
         config.initialize()
-        from freza.webui.server import run as run_webui
-        run_webui(config, host=args.host, port=args.port)
+        from freza.daemon import daemonize, stop_daemon, is_running
+
+        if args.stop:
+            if stop_daemon(config):
+                print("WebUI daemon stopped.")
+            else:
+                print("WebUI daemon is not running.")
+        elif args.status:
+            pid = is_running(config)
+            if pid:
+                print(f"WebUI daemon is running (PID {pid})")
+            else:
+                print("WebUI daemon is not running.")
+        elif args.daemon:
+            pid = daemonize(config, host=args.host, port=args.port)
+            print(f"WebUI daemon started (PID {pid})")
+            print(f"  http://{args.host}:{args.port}")
+            print(f"  Log: {config.webui_log_file}")
+        else:
+            from freza.webui.server import run as run_webui
+            run_webui(config, host=args.host, port=args.port)
 
     elif args.command == "status":
         do_status(config)
