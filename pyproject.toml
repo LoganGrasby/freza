@@ -1,0 +1,18 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "freza"
+version = "0.1.0"
+description = "Autonomous agent system built on Claude Code SDK"
+requires-python = ">=3.10"
+dependencies = [
+    "claude-agent-sdk",
+]
+
+[project.scripts]
+freza = "freza.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/freza"]
