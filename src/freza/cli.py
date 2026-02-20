@@ -27,8 +27,12 @@ from freza.channels import ChannelManager
 from freza.llm import invoke_claude, LLMError
 
 
-def _system_prompt(config: Config, instance: InstanceInfo) -> str:
-    return f"""\
+def _system_prompt(
+    config: Config,
+    instance: InstanceInfo,
+    channel_prompt: str | None = None,
+) -> str:
+    base = f"""\
 You are an autonomous agent running in a persistent environment.
 You may be one of several simultaneous instances of yourself.
 All instances share a single long-term memory file.
@@ -59,6 +63,18 @@ You can build external integrations that trigger new agent invocations.
    screen, or any method you prefer.
 5. Document it in your long-term memory.
 
+### Multi-turn threads
+Pass --thread-id <id> to continue a conversation across invocations:
+  {config.agent_cmd} channel <name> "<message>" --thread-id <id>
+The same thread ID reuses the prior Claude session, preserving context.
+
+### Custom system prompts
+Set a channel-specific system prompt at registration time:
+  {config.agent_cmd} register-channel <name> "<desc>" --system-prompt "instructions"
+  {config.agent_cmd} register-channel <name> "<desc>" --system-prompt @file.txt
+The custom prompt is appended to the default system prompt for every
+invocation on that channel.
+
 ## Behaviour
 - Check what other instances are doing before starting work.
 - Do not duplicate work another instance is already handling.
@@ -66,6 +82,12 @@ You can build external integrations that trigger new agent invocations.
 - During reflection you should be proactive, especially when it comes to fixing known issues.
 - You have full bash, file-editing, and network access.
 """
+    if channel_prompt:
+        base += f"""
+## Channel-Specific Instructions
+{channel_prompt}
+"""
+    return base
 
 
 def _user_prompt(
@@ -228,7 +250,13 @@ async def do_invoke(
     final_status = "finished"
 
     try:
-        system = _system_prompt(config, instance)
+        channel_prompt = None
+        if mode == "channel" and channel_name:
+            ch_record = channels.get_channel(channel_name)
+            if ch_record:
+                channel_prompt = ch_record.get("system_prompt")
+
+        system = _system_prompt(config, instance, channel_prompt=channel_prompt)
         user = _user_prompt(
             config, memory, registry, channels,
             instance, mode, channel_name, trigger_message,
@@ -448,7 +476,11 @@ def do_status(config: Config):
 
     print(f"\n  Channels: {len(chan_list)}")
     for ch in chan_list:
-        print(f"    {ch['name']}: {ch.get('description', '')}")
+        prompt_info = ""
+        sp = ch.get("system_prompt")
+        if sp:
+            prompt_info = f"  [custom prompt: {len(sp)} chars]"
+        print(f"    {ch['name']}: {ch.get('description', '')}{prompt_info}")
     if not chan_list:
         print("    (none)")
 
@@ -506,6 +538,8 @@ def main():
     reg = sub.add_parser("register-channel", help="Register a channel")
     reg.add_argument("name")
     reg.add_argument("description")
+    reg.add_argument("--system-prompt", default=None,
+                     help="Custom system prompt (use @filepath to load from file)")
 
     args = parser.parse_args()
     config = Config(base_dir=args.base_dir)
@@ -551,8 +585,16 @@ def main():
     elif args.command == "register-channel":
         config.ensure_dirs()
         cm = ChannelManager(config)
-        cm.register(args.name, args.description)
+        kwargs = {}
+        if args.system_prompt is not None:
+            prompt_val = args.system_prompt
+            if prompt_val.startswith("@"):
+                prompt_val = Path(prompt_val[1:]).read_text()
+            kwargs["system_prompt"] = prompt_val
+        cm.register(args.name, args.description, **kwargs)
         print(f"Channel '{args.name}' registered.")
+        if "system_prompt" in kwargs:
+            print(f"  Custom system prompt: {len(kwargs['system_prompt'])} chars")
 
     elif args.command == "channel":
         config.initialize()

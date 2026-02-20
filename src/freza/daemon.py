@@ -66,8 +66,10 @@ def daemonize(config: Config, host: str = "127.0.0.1", port: int = 7888) -> int:
 
     Returns the daemon PID. The caller continues normally.
     """
-    # Stop any existing daemon first
-    stop_daemon(config)
+    # If a daemon is already running, return its PID instead of restarting
+    existing = is_running(config)
+    if existing is not None:
+        return existing
 
     pid_file = config.webui_pid_file
     log_file = config.webui_log_file
