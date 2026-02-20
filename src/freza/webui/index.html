@@ -731,6 +731,11 @@ html, body {
       <div class="status-dot" id="status-dot"></div>
       <h2>freza</h2>
       <span class="status-text" id="status-text">ready</span>
+      <div style="flex:1"></div>
+      <button class="sidebar-btn" id="new-chat-btn" title="New Chat" style="width:auto;padding:0 12px;font-size:12px;gap:6px;color:var(--text-2)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        New Chat
+      </button>
     </div>
 
     <div class="chat-messages" id="chat-messages">
@@ -878,6 +883,7 @@ html, body {
 // ── State ──────────────────────────────────────────────────────────
 let streaming = false;
 let currentProcId = null;
+let currentThreadId = null;
 
 // ── DOM Refs ───────────────────────────────────────────────────────
 const chatMessages = document.getElementById('chat-messages');
@@ -940,6 +946,23 @@ chatInput.addEventListener('keydown', e => {
 
 sendBtn.addEventListener('click', sendMessage);
 
+document.getElementById('new-chat-btn').addEventListener('click', () => {
+  if (streaming) return;
+  currentThreadId = null;
+  chatMessages.innerHTML = `
+    <div class="welcome" id="welcome">
+      <div class="welcome-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/>
+        </svg>
+      </div>
+      <h2>Welcome</h2>
+      <p>Send a message to your autonomous agent. It has full access to bash, file editing, web search, and more.</p>
+    </div>`;
+  chatInput.value = '';
+  chatInput.focus();
+});
+
 async function sendMessage() {
   const text = chatInput.value.trim();
   if (!text || streaming) return;
@@ -958,16 +981,20 @@ async function sendMessage() {
 
   try {
     // Start agent
+    const reqBody = { message: text };
+    if (currentThreadId) reqBody.thread_id = currentThreadId;
+
     const res = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: text }),
+      body: JSON.stringify(reqBody),
     });
 
     const data = await res.json();
     if (!data.proc_id) throw new Error('No proc_id returned');
 
     currentProcId = data.proc_id;
+    if (data.thread_id) currentThreadId = data.thread_id;
     setStatus('streaming', 'green');
 
     // Stream response via SSE

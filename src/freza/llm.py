@@ -131,6 +131,7 @@ class InvocationResult:
     tools_used: list[str] = field(default_factory=list)
     turns: int = 0
     conversation: list[dict] = field(default_factory=list)
+    session_id: str | None = None
 
 
 async def invoke_claude(
@@ -141,6 +142,7 @@ async def invoke_claude(
     model: str = "sonnet",
     max_turns: int = 50,
     on_text: Callable[[str], None] | None = None,
+    resume: str | None = None,
 ) -> InvocationResult:
     options = ClaudeAgentOptions(
         permission_mode="bypassPermissions",
@@ -151,6 +153,9 @@ async def invoke_claude(
 
     if system_prompt:
         options.system_prompt = system_prompt
+
+    if resume:
+        options.resume = resume
 
     result = InvocationResult()
     response_parts: list[str] = []
@@ -177,6 +182,7 @@ async def invoke_claude(
 
             elif isinstance(message, ResultMessage):
                 result.cost_usd = message.total_cost_usd or 0.0
+                result.session_id = message.session_id
 
     except Exception as e:
         result.duration_seconds = time.monotonic() - start

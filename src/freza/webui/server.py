@@ -8,6 +8,7 @@ import signal
 import subprocess
 import sys
 import time
+import uuid
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from threading import Thread
@@ -126,8 +127,9 @@ def _get_system_stats():
 
 class AgentProcess:
 
-    def __init__(self, message: str):
+    def __init__(self, message: str, thread_id: str | None = None):
         self.message = message
+        self.thread_id = thread_id
         self.process: subprocess.Popen | None = None
         self.output_chunks: list[str] = []
         self.done = False
@@ -138,6 +140,8 @@ class AgentProcess:
         env.pop("CLAUDECODE", None)
 
         cmd = cfg.agent_cmd_argv + ["channel", "webui", self.message]
+        if self.thread_id:
+            cmd += ["--thread-id", self.thread_id]
         self.process = subprocess.Popen(
             cmd,
             cwd=str(cfg.base_dir),
@@ -312,11 +316,13 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 self._json_response({"error": "empty message"}, 400)
                 return
 
+            thread_id = data.get("thread_id") or uuid.uuid4().hex
+
             global _proc_counter
             _proc_counter += 1
             proc_id = f"proc_{_proc_counter}_{int(time.time())}"
 
-            proc = AgentProcess(message)
+            proc = AgentProcess(message, thread_id=thread_id)
             try:
                 proc.start()
             except FileNotFoundError as e:
@@ -327,7 +333,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 return
             _active_procs[proc_id] = proc
 
-            self._json_response({"proc_id": proc_id, "status": "started"})
+            self._json_response({"proc_id": proc_id, "thread_id": thread_id, "status": "started"})
 
         else:
             self._json_response({"error": "not found"}, 404)

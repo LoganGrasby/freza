@@ -177,11 +177,29 @@ def _atomic_write_log(path: Path, data: dict):
         raise
 
 
+def _find_session_for_thread(config: Config, thread_id: str) -> str | None:
+    """Find the session_id from the most recent log for a given thread."""
+    log_files = sorted(
+        config.logs_dir.glob("*.log"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    for lf in log_files:
+        try:
+            data = json.loads(lf.read_text())
+            if data.get("thread_id") == thread_id and data.get("session_id"):
+                return data["session_id"]
+        except Exception:
+            continue
+    return None
+
+
 async def do_invoke(
     config: Config,
     mode: str,
     channel_name: str | None = None,
     trigger_message: str | None = None,
+    thread_id: str | None = None,
 ):
     _ensure_claude_cli()
     memory = MemoryManager(config)
@@ -218,6 +236,14 @@ async def do_invoke(
 
         memory.update_short_term(instance.instance_id, current_task="thinking")
 
+        # Look up prior session for multi-turn threads
+        resume_session = None
+        if thread_id:
+            resume_session = _find_session_for_thread(config, thread_id)
+            if resume_session:
+                print(f"[{instance.instance_id}] resuming thread {thread_id} "
+                      f"(session={resume_session[:12]}...)")
+
         print(f"[{instance.instance_id}] invoking claude (model={config.model}, "
               f"max_turns={config.max_turns})...")
 
@@ -233,6 +259,7 @@ async def do_invoke(
             model=config.model,
             max_turns=config.max_turns,
             on_text=stream_text,
+            resume=resume_session,
         )
 
         if stream_text:
@@ -249,6 +276,8 @@ async def do_invoke(
             "tools_used": result.tools_used,
             "turns": result.turns,
             "timestamp": time.time(),
+            "session_id": result.session_id,
+            "thread_id": thread_id,
             "conversation": result.conversation,
         }
         _atomic_write_log(log_file, log_entry)
@@ -449,18 +478,6 @@ def do_status(config: Config):
 def main():
     parser = argparse.ArgumentParser(
         description="Freza System",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""\
-Commands:
-  init                        Create a new workspace in --base-dir
-  setup                       Initialize workspace & install cron
-  reflect                     Cron-triggered self-reflection (default)
-  channel <name> <message>    Triggered by an external channel
-  webui                       Start the web UI server
-  status                      Show running instances & memory
-  register-channel <n> <d>    Register a channel by name & description
-  cleanup                     Prune stale short-term state files
-""",
     )
     parser.add_argument("--base-dir", default=None, help="Workspace directory (default: current directory)")
 
@@ -472,6 +489,7 @@ Commands:
     ch = sub.add_parser("channel", help="Channel trigger")
     ch.add_argument("channel_name")
     ch.add_argument("message")
+    ch.add_argument("--thread-id", default=None, help="Thread ID for multi-turn conversations")
 
     sub.add_parser("setup", help="Initialize workspace & install cron")
 
@@ -543,6 +561,7 @@ Commands:
             config, mode="channel",
             channel_name=args.channel_name,
             trigger_message=args.message,
+            thread_id=args.thread_id,
         ))
 
     else:
