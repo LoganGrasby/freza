@@ -398,7 +398,7 @@ def do_setup(config: Config):
 
     agent_cmd = (
         f"{config.agent_cmd} reflect "
-        f">> {config.logs_dir}/cron.log 2>&1"
+        f'>> "{config.logs_dir}/cron.log" 2>&1'
     )
     cron_line = f"{config.cron_schedule} {agent_cmd}"
 

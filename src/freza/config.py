@@ -59,7 +59,7 @@ class Config:
 
     @property
     def agent_cmd(self) -> str:
-        return f"{sys.executable} -m freza --base-dir {self.base_dir}"
+        return f'{sys.executable} -m freza --base-dir "{self.base_dir}"'
 
     @property
     def agent_cmd_argv(self) -> list[str]:
