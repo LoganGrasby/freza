@@ -161,6 +161,29 @@ html, body {
   color: var(--text-2);
 }
 
+.agent-select {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-1);
+  font-family: var(--font);
+  font-size: 12px;
+  padding: 4px 8px;
+  cursor: pointer;
+  outline: none;
+  transition: border-color var(--transition);
+  margin-left: 8px;
+}
+
+.agent-select:focus {
+  border-color: var(--accent);
+}
+
+.agent-select option {
+  background: var(--bg-2);
+  color: var(--text-0);
+}
+
 .chat-messages {
   flex: 1;
   overflow-y: auto;
@@ -731,6 +754,9 @@ html, body {
       <div class="status-dot" id="status-dot"></div>
       <h2>freza</h2>
       <span class="status-text" id="status-text">ready</span>
+      <select id="agent-select" class="agent-select" title="Select agent">
+        <option value="default">default</option>
+      </select>
       <div style="flex:1"></div>
       <button class="sidebar-btn" id="new-chat-btn" title="New Chat" style="width:auto;padding:0 12px;font-size:12px;gap:6px;color:var(--text-2)">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
@@ -792,6 +818,10 @@ html, body {
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
           Channels
         </div>
+        <div class="diag-nav-item" data-section="agents">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4-4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>
+          Agents
+        </div>
       </div>
       <div class="diag-content">
         <!-- Overview Section -->
@@ -817,6 +847,7 @@ html, body {
             <thead>
               <tr>
                 <th>Time</th>
+                <th>Agent</th>
                 <th>Channel</th>
                 <th>Duration</th>
                 <th>Cost</th>
@@ -861,6 +892,17 @@ html, body {
           </div>
           <div id="channels-content"></div>
         </div>
+
+        <!-- Agents Section -->
+        <div class="diag-section" id="section-agents">
+          <div class="section-title">
+            Registered Agents
+            <button class="refresh-btn" onclick="loadAgents()">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-1.98-9.74L23 10"/></svg>
+            </button>
+          </div>
+          <div id="agents-content"></div>
+        </div>
       </div>
     </div>
   </div>
@@ -892,6 +934,7 @@ const sendBtn = document.getElementById('send-btn');
 const statusDot = document.getElementById('status-dot');
 const statusText = document.getElementById('status-text');
 const welcome = document.getElementById('welcome');
+const agentSelect = document.getElementById('agent-select');
 
 // ── Panel Switching ────────────────────────────────────────────────
 document.querySelectorAll('.sidebar-btn[data-panel]').forEach(btn => {
@@ -929,6 +972,7 @@ function loadActiveDiagSection() {
   else if (s === 'instances') loadInstances();
   else if (s === 'memory') loadMemory();
   else if (s === 'channels') loadChannels();
+  else if (s === 'agents') loadAgents();
 }
 
 // ── Chat ───────────────────────────────────────────────────────────
@@ -981,7 +1025,7 @@ async function sendMessage() {
 
   try {
     // Start agent
-    const reqBody = { message: text };
+    const reqBody = { message: text, agent: agentSelect.value };
     if (currentThreadId) reqBody.thread_id = currentThreadId;
 
     const res = await fetch('/api/chat', {
@@ -1115,6 +1159,7 @@ async function loadLogs() {
     tbody.innerHTML = logs.map(log => `
       <tr class="clickable" onclick="openLogDetail('${log.file}')">
         <td>${formatTimestamp(log.timestamp)}</td>
+        <td><span class="tag" style="background:var(--accent-glow);color:var(--accent)">${log.agent || 'default'}</span></td>
         <td><span class="tag ${log.channel === 'webui' ? 'blue' : 'neutral'}">${log.channel || log.mode}</span></td>
         <td>${log.duration ? log.duration.toFixed(1) + 's' : '-'}</td>
         <td>${log.cost ? '$' + log.cost.toFixed(4) : '-'}</td>
@@ -1195,7 +1240,8 @@ async function loadInstances() {
 
 async function loadMemory() {
   try {
-    const data = await fetch('/api/memory').then(r => r.json());
+    const agent = agentSelect.value || 'default';
+    const data = await fetch('/api/memory?agent=' + encodeURIComponent(agent)).then(r => r.json());
     document.getElementById('memory-content').textContent = data.content || '(empty)';
   } catch (e) {
     console.error('Failed to load memory:', e);
@@ -1224,6 +1270,55 @@ async function loadChannels() {
     container.innerHTML = html;
   } catch (e) {
     console.error('Failed to load channels:', e);
+  }
+}
+
+async function loadAgents() {
+  try {
+    const agents = await fetch('/api/agents').then(r => r.json());
+    const container = document.getElementById('agents-content');
+
+    if (agents.length === 0) {
+      container.innerHTML = '<div class="empty-state"><p>No agents registered</p></div>';
+      return;
+    }
+
+    let html = '<table class="data-table"><thead><tr><th>Name</th><th>Description</th><th>Created</th></tr></thead><tbody>';
+    agents.forEach(a => {
+      html += `<tr>
+        <td><span class="tag accent" style="background:var(--accent-glow);color:var(--accent)">${a.name}</span></td>
+        <td>${escapeHtml(a.description || '')}</td>
+        <td>${a.created_at ? formatTimestamp(a.created_at) : '-'}</td>
+      </tr>`;
+    });
+    html += '</tbody></table>';
+    container.innerHTML = html;
+  } catch (e) {
+    console.error('Failed to load agents:', e);
+  }
+}
+
+async function loadAgentSelector() {
+  try {
+    const agents = await fetch('/api/agents').then(r => r.json());
+    const current = agentSelect.value;
+    agentSelect.innerHTML = '';
+    if (agents.length === 0) {
+      agentSelect.innerHTML = '<option value="default">default</option>';
+    } else {
+      agents.forEach(a => {
+        const opt = document.createElement('option');
+        opt.value = a.name;
+        opt.textContent = a.name;
+        agentSelect.appendChild(opt);
+      });
+    }
+    // Restore previous selection if still valid
+    if (current && [...agentSelect.options].some(o => o.value === current)) {
+      agentSelect.value = current;
+    }
+  } catch (e) {
+    console.error('Failed to load agent selector:', e);
   }
 }
 
@@ -1344,6 +1439,7 @@ function formatDuration(seconds) {
 }
 
 // ── Init ───────────────────────────────────────────────────────────
+loadAgentSelector();
 chatInput.focus();
 </script>
 </body>

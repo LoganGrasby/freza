@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib.util
 import json
 import os
 import platform
@@ -24,41 +25,66 @@ from freza.config import Config
 from freza.memory import MemoryManager
 from freza.registry import InstanceRegistry, InstanceInfo
 from freza.channels import ChannelManager
-from freza.llm import invoke_claude, LLMError
+from freza.agents import AgentManager
+from freza.llm import invoke_claude, LLMError, InvocationResult
 
 
 def _system_prompt(
     config: Config,
     instance: InstanceInfo,
+    agent_name: str,
+    agent_config: dict | None = None,
     channel_prompt: str | None = None,
 ) -> str:
+    agent_dir = config.agent_dir(agent_name)
+    memory_file = config.agent_memory_file(agent_name)
+
     base = f"""\
-You are an autonomous agent running in a persistent environment.
+You are "{agent_name}", an autonomous agent running in a persistent environment.
 You may be one of several simultaneous instances of yourself.
-All instances share a single long-term memory file.
+Each agent has its own memory file and working directory.
 
 ## Environment
-- Working directory: {config.base_dir}
-- Long-term memory: {config.memory_file}
-- Short-term state:  {config.short_term_dir}/{instance.instance_id}.json
-- Channels dir:      {config.channels_dir}/
-- Your instance ID:  {instance.instance_id}
+- Your agent directory: {agent_dir}
+- Long-term memory:     {memory_file}
+- Short-term state:     {config.short_term_dir}/{instance.instance_id}.json
+- Channels dir:         {config.channels_dir}/
+- Your instance ID:     {instance.instance_id}
+- Your agent name:      {agent_name}
 
 ## Memory Rules
-- Edit {config.memory_file} directly for persistent knowledge.
+- Edit {memory_file} directly for persistent knowledge.
   Prefer the locked helper for appends:
     {config.tools_dir}/update_memory.sh "text to append"
 - Keep memory concise: identity, core knowledge, active projects, channels.
 - Update your short-term state file's "current_task" field so other
   instances know what you are doing.
 
+## Agent System
+You are part of a multi-agent system. Each agent has its own directory,
+memory, and optional custom invocation logic.
+
+To create a new agent:
+  {config.agent_cmd} register-agent <name> "<description>" [--system-prompt "..."]
+
+Agent directories live at {config.agents_dir}/<name>/ and contain:
+  - agent.json:  Agent configuration (name, description, system_prompt)
+  - memory.md:   Agent-specific long-term memory
+  - invoke.py:   Optional custom invocation script (Claude Agent SDK)
+
+To invoke another agent directly:
+  {config.agent_cmd} invoke <agent_name> "<message>" [--thread-id <id>]
+
+Custom invoke.py convention:
+  async def invoke(prompt, system_prompt, agent_dir, config_path) -> str
+
 ## Channel System
-You can build external integrations that trigger new agent invocations.
+Channels are external programs that route messages to specific agents.
 1. Create a program in {config.channels_dir}/<name>/
 2. That program should call back:
-     {config.agent_cmd} channel <name> "<message>"
+     {config.agent_cmd} channel <name> "<message>" [--agent <agent_name>]
 3. Register the channel:
-     {config.agent_cmd} register-channel <name> "<description>"
+     {config.agent_cmd} register-channel <name> "<description>" [--default-agent <name>]
 4. To start/manage it as a background service, use systemd, supervisord,
    screen, or any method you prefer.
 5. Document it in your long-term memory.
@@ -78,9 +104,12 @@ invocation on that channel.
 ## Behaviour
 - Check what other instances are doing before starting work.
 - Do not duplicate work another instance is already handling.
-- During cron reflection you are free to do nothing if there is nothing useful.
-- During reflection you should be proactive, especially when it comes to fixing known issues.
 - You have full bash, file-editing, and network access.
+"""
+    if agent_config and agent_config.get("system_prompt"):
+        base += f"""
+## Agent-Specific Instructions
+{agent_config['system_prompt']}
 """
     if channel_prompt:
         base += f"""
@@ -95,7 +124,9 @@ def _user_prompt(
     memory: MemoryManager,
     registry: InstanceRegistry,
     channels: ChannelManager,
+    agents: AgentManager,
     instance: InstanceInfo,
+    agent_name: str,
     mode: str,
     channel_name: str | None,
     trigger_message: str | None,
@@ -113,12 +144,27 @@ def _user_prompt(
         )
     parts.append("")
 
+    # Registered agents
+    agent_list = agents.list_agents()
+    parts.append("## Registered Agents\n")
+    if agent_list:
+        for a in agent_list:
+            marker = " (you)" if a["name"] == agent_name else ""
+            invoke_exists = config.agent_invoke_file(a["name"]).exists()
+            invoke_info = " [custom invoke.py]" if invoke_exists else ""
+            parts.append(
+                f"- **{a['name']}**: {a.get('description', '')}{marker}{invoke_info}"
+            )
+    else:
+        parts.append("(none)")
+    parts.append("")
+
     instances = registry.get_active()
     others = [i for i in instances if i.instance_id != instance.instance_id]
 
     parts.append("## Active Instances\n")
     parts.append(f"**You**: `{instance.instance_id}` (mode={instance.mode}, "
-                 f"pid={instance.pid})")
+                 f"agent={agent_name}, pid={instance.pid})")
     if others:
         parts.append(f"\n{len(others)} other instance(s):\n")
         for o in others:
@@ -126,7 +172,7 @@ def _user_prompt(
             task = st.get("current_task", "unknown") if st else "unknown"
             age = time.time() - o.started_at
             parts.append(
-                f"- `{o.instance_id}` mode={o.mode} "
+                f"- `{o.instance_id}` mode={o.mode} agent={o.agent_name} "
                 f"task=\"{task}\" uptime={age:.0f}s"
             )
     else:
@@ -137,22 +183,22 @@ def _user_prompt(
     parts.append("## Registered Channels\n")
     if chans:
         for ch in chans:
-            parts.append(f"- **{ch['name']}**: {ch.get('description', '')}")
+            default_agent = ch.get("default_agent", "default")
+            parts.append(
+                f"- **{ch['name']}**: {ch.get('description', '')} "
+                f"(default_agent={default_agent})"
+            )
     else:
         parts.append("(none)")
     parts.append("")
 
     parts.append("## Trigger\n")
-    if mode == "reflect":
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-        parts.append(
-            f"**Cron reflection** at {now}.\n"
-            "Review your memory, check ongoing projects, and take action "
-            "only if something is genuinely useful. It is perfectly fine "
-            "to do nothing."
-        )
-    elif mode == "channel":
+    if mode == "channel":
         parts.append(f"**Incoming message** on channel `{channel_name}`:\n")
+        parts.append(f"```\n{trigger_message}\n```\n")
+        parts.append("Respond to this message and take any appropriate actions.")
+    elif mode == "invoke":
+        parts.append(f"**Direct invocation** of agent `{agent_name}`:\n")
         parts.append(f"```\n{trigger_message}\n```\n")
         parts.append("Respond to this message and take any appropriate actions.")
     parts.append("")
@@ -216,28 +262,75 @@ def _find_session_for_thread(config: Config, thread_id: str) -> str | None:
     return None
 
 
+async def _custom_invoke(
+    invoke_file: Path,
+    prompt: str,
+    system_prompt: str,
+    agent_dir: Path,
+    config_path: Path,
+) -> InvocationResult:
+    """Load and call an agent's custom invoke.py."""
+    spec = importlib.util.spec_from_file_location("agent_invoke", invoke_file)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    if not hasattr(mod, "invoke"):
+        raise RuntimeError(f"{invoke_file} does not define an 'invoke' function")
+
+    start = time.time()
+    response = await mod.invoke(
+        prompt=prompt,
+        system_prompt=system_prompt,
+        agent_dir=str(agent_dir),
+        config_path=str(config_path),
+    )
+    duration = time.time() - start
+
+    return InvocationResult(
+        response=response,
+        duration_seconds=duration,
+        cost_usd=0.0,
+        tools_used=[],
+        turns=1,
+        session_id=None,
+        conversation=[],
+    )
+
+
 async def do_invoke(
     config: Config,
     mode: str,
     channel_name: str | None = None,
     trigger_message: str | None = None,
     thread_id: str | None = None,
+    agent_name: str = "default",
 ):
     _ensure_claude_cli()
-    memory = MemoryManager(config)
+    agents = AgentManager(config)
+    memory = MemoryManager(config, agent_name=agent_name)
     registry = InstanceRegistry(config)
     channels = ChannelManager(config)
+
+    # Resolve agent
+    agent_config = agents.get_agent_config(agent_name)
+    if not agent_config and agent_name != "default":
+        print(f"Warning: agent '{agent_name}' not found, falling back to 'default'")
+        agent_name = "default"
+        agent_config = agents.get_agent_config(agent_name)
+        memory = MemoryManager(config, agent_name=agent_name)
 
     instance = registry.register(
         mode=mode,
         channel_name=channel_name,
         trigger_message=trigger_message,
+        agent_name=agent_name,
     )
-    print(f"[{instance.instance_id}] registered (mode={mode}, pid={instance.pid})")
+    print(f"[{instance.instance_id}] registered (mode={mode}, agent={agent_name}, pid={instance.pid})")
 
     memory.write_short_term(instance.instance_id, {
         "instance_id": instance.instance_id,
         "mode": mode,
+        "agent_name": agent_name,
         "channel_name": channel_name,
         "started_at": instance.started_at,
         "current_task": "initializing",
@@ -256,46 +349,62 @@ async def do_invoke(
             if ch_record:
                 channel_prompt = ch_record.get("system_prompt")
 
-        system = _system_prompt(config, instance, channel_prompt=channel_prompt)
+        system = _system_prompt(
+            config, instance,
+            agent_name=agent_name,
+            agent_config=agent_config,
+            channel_prompt=channel_prompt,
+        )
         user = _user_prompt(
-            config, memory, registry, channels,
-            instance, mode, channel_name, trigger_message,
+            config, memory, registry, channels, agents,
+            instance, agent_name, mode, channel_name, trigger_message,
         )
 
         memory.update_short_term(instance.instance_id, current_task="thinking")
 
-        # Look up prior session for multi-turn threads
-        resume_session = None
-        if thread_id:
-            resume_session = _find_session_for_thread(config, thread_id)
-            if resume_session:
-                print(f"[{instance.instance_id}] resuming thread {thread_id} "
-                      f"(session={resume_session[:12]}...)")
+        # Check for custom invoke.py
+        invoke_file = config.agent_invoke_file(agent_name)
+        if invoke_file.exists():
+            print(f"[{instance.instance_id}] using custom invoke.py for agent '{agent_name}'")
+            result = await _custom_invoke(
+                invoke_file, user, system,
+                config.agent_dir(agent_name),
+                config.base_dir,
+            )
+        else:
+            # Look up prior session for multi-turn threads
+            resume_session = None
+            if thread_id:
+                resume_session = _find_session_for_thread(config, thread_id)
+                if resume_session:
+                    print(f"[{instance.instance_id}] resuming thread {thread_id} "
+                          f"(session={resume_session[:12]}...)")
 
-        print(f"[{instance.instance_id}] invoking claude (model={config.model}, "
-              f"max_turns={config.max_turns})...")
+            print(f"[{instance.instance_id}] invoking claude (model={config.model}, "
+                  f"max_turns={config.max_turns})...")
 
-        stream_text = None
-        if mode == "channel":
-            def stream_text(text: str) -> None:
-                print(text, end="", flush=True)
+            stream_text = None
+            if mode == "channel":
+                def stream_text(text: str) -> None:
+                    print(text, end="", flush=True)
 
-        result = await invoke_claude(
-            prompt=user,
-            system_prompt=system,
-            cwd=str(config.base_dir),
-            model=config.model,
-            max_turns=config.max_turns,
-            on_text=stream_text,
-            resume=resume_session,
-        )
+            result = await invoke_claude(
+                prompt=user,
+                system_prompt=system,
+                cwd=str(config.agent_dir(agent_name)),
+                model=config.model,
+                max_turns=config.max_turns,
+                on_text=stream_text,
+                resume=resume_session,
+            )
 
-        if stream_text:
-            print()
+            if stream_text:
+                print()
 
         log_entry = {
             "instance_id": instance.instance_id,
             "mode": mode,
+            "agent_name": agent_name,
             "channel_name": channel_name,
             "trigger_message": (trigger_message or "")[:500],
             "response": result.response[:5000],
@@ -340,6 +449,7 @@ async def do_invoke(
         )
         log_file.write_text(json.dumps({
             "instance_id": instance.instance_id,
+            "agent_name": agent_name,
             "error": str(e),
             "timestamp": time.time(),
         }, indent=2))
@@ -372,11 +482,14 @@ def do_cleanup(config: Config):
 
 def do_init(config: Config):
     config.initialize()
-    do_setup(config)
 
-    # Auto-register the webui channel
+    # Register the default agent
+    agents = AgentManager(config)
+    agents.register("default", "Default general-purpose agent")
+
+    # Auto-register the webui channel with default agent
     channels = ChannelManager(config)
-    channels.register("webui", "Web UI chat interface")
+    channels.register("webui", "Web UI chat interface", default_agent="default")
 
     # Auto-start the webui daemon
     from freza.daemon import daemonize
@@ -386,82 +499,68 @@ def do_init(config: Config):
     print(f"  Log: {config.webui_log_file}")
 
     print(f"\nWorkspace: {config.base_dir}")
-    print(f"Cron reflection is active ({config.cron_schedule}).")
-    print(f"\nTo interact directly:")
+    print(f"\nTo interact:")
+    print(f"  freza invoke default \"hello\"")
     print(f"  freza channel webui \"hello\"")
+    print(f"  freza register-agent researcher \"Research agent\"")
     print(f"  freza webui --status")
     print(f"  freza status")
 
 
-def do_setup(config: Config):
-    config.initialize()
-
-    agent_cmd = (
-        f"{config.agent_cmd} reflect "
-        f'>> "{config.logs_dir}/cron.log" 2>&1'
-    )
-    cron_line = f"{config.cron_schedule} {agent_cmd}"
-
-    try:
-        existing = subprocess.run(
-            ["crontab", "-l"], capture_output=True, text=True
-        ).stdout
-    except FileNotFoundError:
-        existing = ""
-
-    marker = "# freza-reflect"
-    lines = [l for l in existing.splitlines() if marker not in l]
-    lines.append(f"{cron_line}  {marker}")
-
-    subprocess.run(
-        ["crontab", "-"],
-        input="\n".join(lines) + "\n",
-        text=True,
-        check=True,
-    )
-
-    print("Setup complete:")
-    print(f"  Base dir:    {config.base_dir}")
-    print(f"  Memory:      {config.memory_file}")
-    print(f"  State:       {config.state_dir}")
-    print(f"  Channels:    {config.channels_dir}")
-    print(f"  Cron:        {cron_line}")
-    print(f"\nManual invoke:")
-    print(f"  {config.agent_cmd} reflect")
-    print(f"  {config.agent_cmd} channel <name> \"<message>\"")
-
-
 def do_status(config: Config):
     config.ensure_dirs()
-    config.ensure_memory()
 
     registry = InstanceRegistry(config)
-    memory = MemoryManager(config)
     channels = ChannelManager(config)
+    agents = AgentManager(config)
 
     instances = registry.get_active()
     chan_list = channels.list_channels()
+    agent_list = agents.list_agents()
 
     print("=" * 50)
     print("  Freza Status")
     print("=" * 50)
 
-    mem = memory.read()
-    mem_lines = mem.strip().splitlines()
-    print(f"\n  Memory: {len(mem_lines)} lines, {len(mem)} bytes")
-    for line in mem_lines[:5]:
-        print(f"    {line}")
-    if len(mem_lines) > 5:
-        print(f"    ... ({len(mem_lines) - 5} more lines)")
+    # Agents section
+    print(f"\n  Agents: {len(agent_list)}")
+    for a in agent_list:
+        name = a["name"]
+        mem_file = config.agent_memory_file(name)
+        invoke_file = config.agent_invoke_file(name)
+        mem_info = ""
+        if mem_file.exists():
+            mem_text = mem_file.read_text()
+            mem_lines = mem_text.strip().splitlines()
+            mem_info = f"{len(mem_lines)} lines, {len(mem_text)} bytes"
+        else:
+            mem_info = "no memory"
+        invoke_info = " [custom invoke.py]" if invoke_file.exists() else ""
+        print(f"    {name}: {a.get('description', '')}")
+        print(f"      memory: {mem_info}{invoke_info}")
+
+        # Show memory preview
+        if mem_file.exists():
+            mem_text = mem_file.read_text()
+            mem_lines = mem_text.strip().splitlines()
+            for line in mem_lines[:3]:
+                print(f"        {line}")
+            if len(mem_lines) > 3:
+                print(f"        ... ({len(mem_lines) - 3} more lines)")
+    if not agent_list:
+        print("    (none)")
 
     print(f"\n  Active instances: {len(instances)}")
     if instances:
+        # Use default agent for short-term reads
+        memory = MemoryManager(config, agent_name="default")
         for inst in instances:
             st = memory.read_short_term(inst.instance_id)
             task = st.get("current_task", "?") if st else "?"
             age = time.time() - inst.started_at
             print(
                 f"    {inst.instance_id}  mode={inst.mode:8s}  "
+                f"agent={inst.agent_name:12s}  "
                 f"task={task:20s}  uptime={age:.0f}s  pid={inst.pid}"
             )
     else:
@@ -480,7 +579,8 @@ def do_status(config: Config):
         sp = ch.get("system_prompt")
         if sp:
             prompt_info = f"  [custom prompt: {len(sp)} chars]"
-        print(f"    {ch['name']}: {ch.get('description', '')}{prompt_info}")
+        default_agent = ch.get("default_agent", "default")
+        print(f"    {ch['name']}: {ch.get('description', '')} (agent={default_agent}){prompt_info}")
     if not chan_list:
         print("    (none)")
 
@@ -497,10 +597,11 @@ def do_status(config: Config):
                 data.get("timestamp", 0), timezone.utc
             ).strftime("%H:%M:%S")
             mode = data.get("mode", "?")
+            agent = data.get("agent_name", "?")
             dur = data.get("duration_seconds", 0)
             err = data.get("error")
             status = "X" if err else "OK"
-            print(f"    {status} {ts} mode={mode} {dur:.1f}s  {lf.stem}")
+            print(f"    {status} {ts} mode={mode} agent={agent} {dur:.1f}s  {lf.stem}")
         except Exception:
             pass
 
@@ -516,14 +617,17 @@ def main():
     sub = parser.add_subparsers(dest="command")
 
     sub.add_parser("init", help="Create a new workspace")
-    sub.add_parser("reflect", help="Cron reflection")
 
     ch = sub.add_parser("channel", help="Channel trigger")
     ch.add_argument("channel_name")
     ch.add_argument("message")
     ch.add_argument("--thread-id", default=None, help="Thread ID for multi-turn conversations")
+    ch.add_argument("--agent", default=None, help="Agent to route to (overrides channel default)")
 
-    sub.add_parser("setup", help="Initialize workspace & install cron")
+    inv = sub.add_parser("invoke", help="Invoke an agent directly")
+    inv.add_argument("agent_name")
+    inv.add_argument("message")
+    inv.add_argument("--thread-id", default=None, help="Thread ID for multi-turn conversations")
 
     ui = sub.add_parser("webui", help="Start the web UI server")
     ui.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1)")
@@ -540,15 +644,20 @@ def main():
     reg.add_argument("description")
     reg.add_argument("--system-prompt", default=None,
                      help="Custom system prompt (use @filepath to load from file)")
+    reg.add_argument("--default-agent", default=None,
+                     help="Default agent for this channel")
+
+    reg_agent = sub.add_parser("register-agent", help="Register an agent")
+    reg_agent.add_argument("name")
+    reg_agent.add_argument("description")
+    reg_agent.add_argument("--system-prompt", default=None,
+                           help="Custom system prompt for this agent")
 
     args = parser.parse_args()
     config = Config(base_dir=args.base_dir)
 
     if args.command == "init":
         do_init(config)
-
-    elif args.command == "setup":
-        do_setup(config)
 
     elif args.command == "webui":
         config.initialize()
@@ -591,25 +700,65 @@ def main():
             if prompt_val.startswith("@"):
                 prompt_val = Path(prompt_val[1:]).read_text()
             kwargs["system_prompt"] = prompt_val
+        if args.default_agent is not None:
+            kwargs["default_agent"] = args.default_agent
         cm.register(args.name, args.description, **kwargs)
         print(f"Channel '{args.name}' registered.")
         if "system_prompt" in kwargs:
             print(f"  Custom system prompt: {len(kwargs['system_prompt'])} chars")
+        if "default_agent" in kwargs:
+            print(f"  Default agent: {kwargs['default_agent']}")
+
+    elif args.command == "register-agent":
+        config.ensure_dirs()
+        am = AgentManager(config)
+        kwargs = {}
+        if args.system_prompt is not None:
+            prompt_val = args.system_prompt
+            if prompt_val.startswith("@"):
+                prompt_val = Path(prompt_val[1:]).read_text()
+            kwargs["system_prompt"] = prompt_val
+        am.register(args.name, args.description, **kwargs)
+        print(f"Agent '{args.name}' registered.")
+        print(f"  Directory: {config.agent_dir(args.name)}")
+        print(f"  Memory:    {config.agent_memory_file(args.name)}")
+        if "system_prompt" in kwargs:
+            print(f"  Custom system prompt: {len(kwargs['system_prompt'])} chars")
+
+    elif args.command == "invoke":
+        config.initialize()
+        do_cleanup(config)
+        asyncio.run(do_invoke(
+            config, mode="invoke",
+            trigger_message=args.message,
+            thread_id=args.thread_id,
+            agent_name=args.agent_name,
+        ))
 
     elif args.command == "channel":
         config.initialize()
         do_cleanup(config)
+
+        # Resolve agent: explicit --agent flag > channel's default_agent > "default"
+        agent_name = args.agent
+        if not agent_name:
+            cm = ChannelManager(config)
+            ch_record = cm.get_channel(args.channel_name)
+            if ch_record:
+                agent_name = ch_record.get("default_agent", "default")
+            else:
+                agent_name = "default"
+
         asyncio.run(do_invoke(
             config, mode="channel",
             channel_name=args.channel_name,
             trigger_message=args.message,
             thread_id=args.thread_id,
+            agent_name=agent_name,
         ))
 
     else:
-        config.initialize()
-        do_cleanup(config)
-        asyncio.run(do_invoke(config, mode="reflect"))
+        parser.print_help()
 
 
 if __name__ == "__main__":

@@ -24,6 +24,7 @@ class InstanceInfo:
     started_at: float
     last_heartbeat: float
     status: str = "running"
+    agent_name: str = "default"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -69,6 +70,7 @@ class InstanceRegistry:
         mode: str,
         channel_name: str | None = None,
         trigger_message: str | None = None,
+        agent_name: str = "default",
     ) -> InstanceInfo:
         now = time.time()
         info = InstanceInfo(
@@ -79,6 +81,7 @@ class InstanceRegistry:
             trigger_message=trigger_message[:500] if trigger_message else None,
             started_at=now,
             last_heartbeat=now,
+            agent_name=agent_name,
         )
 
         def _add(entries):

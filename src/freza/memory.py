@@ -33,25 +33,29 @@ def _atomic_write(path: Path, content: str):
 
 
 class MemoryManager:
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, agent_name: str = "default"):
         self.config = config
+        self.agent_name = agent_name
+        self._memory_file = config.agent_memory_file(agent_name)
 
     def read(self) -> str:
-        with _flock(self.config.memory_file, exclusive=False):
-            if self.config.memory_file.exists():
-                return self.config.memory_file.read_text()
+        if not self._memory_file.exists():
+            return ""
+        with _flock(self._memory_file, exclusive=False):
+            if self._memory_file.exists():
+                return self._memory_file.read_text()
             return ""
 
     def write(self, content: str):
-        with _flock(self.config.memory_file, exclusive=True):
-            _atomic_write(self.config.memory_file, content)
+        with _flock(self._memory_file, exclusive=True):
+            _atomic_write(self._memory_file, content)
 
     def append(self, content: str):
-        with _flock(self.config.memory_file, exclusive=True):
+        with _flock(self._memory_file, exclusive=True):
             existing = ""
-            if self.config.memory_file.exists():
-                existing = self.config.memory_file.read_text()
-            _atomic_write(self.config.memory_file, existing + "\n" + content + "\n")
+            if self._memory_file.exists():
+                existing = self._memory_file.read_text()
+            _atomic_write(self._memory_file, existing + "\n" + content + "\n")
 
     def _short_term_path(self, instance_id: str) -> Path:
         return self.config.short_term_dir / f"{instance_id}.json"

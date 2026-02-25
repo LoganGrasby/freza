@@ -13,18 +13,16 @@ def default_base_dir() -> Path:
 
 
 MEMORY_TEMPLATE = """\
-# Agent Memory
+# Agent Memory — {agent_name}
 
 ## Identity
-I am an autonomous agent. I persist across invocations and maintain this memory.
+I am "{agent_name}", an autonomous agent. I persist across invocations and maintain this memory.
+{description_line}
 
 ## Core Knowledge
 
 
 ## Active Projects
-
-
-## Registered Channels
 
 
 ## Notes
@@ -39,11 +37,12 @@ class Config:
         ).resolve()
 
         self.state_dir = self.base_dir / "state"
-        self.memory_file = self.state_dir / "memory.md"
         self.registry_file = self.state_dir / "registry.json"
         self.short_term_dir = self.state_dir / "short_term"
         self.channels_dir = self.base_dir / "channels"
         self.channels_meta = self.state_dir / "channels.json"
+        self.agents_dir = self.base_dir / "agents"
+        self.agents_meta = self.state_dir / "agents.json"
         self.logs_dir = self.state_dir / "logs"
         self.tools_dir = self.base_dir / "tools"
         self.webui_pid_file = self.state_dir / "webui.pid"
@@ -51,11 +50,22 @@ class Config:
 
         self.heartbeat_interval = int(os.environ.get("AGENT_HEARTBEAT_SEC", "30"))
         self.stale_threshold = int(os.environ.get("AGENT_STALE_SEC", "300"))
-        self.cron_schedule = os.environ.get("AGENT_CRON_SCHEDULE", "*/15 * * * *")
 
         self.model = os.environ.get("AGENT_MODEL", "claude-opus-4-6")
-        self.max_turns = int(os.environ.get("AGENT_MAX_TURNS", "25"))
+        self.max_turns = int(os.environ.get("AGENT_MAX_TURNS", "100"))
         self.timeout = int(os.environ.get("AGENT_TIMEOUT_SEC", "600"))
+
+    def agent_dir(self, name: str) -> Path:
+        return self.agents_dir / name
+
+    def agent_config_file(self, name: str) -> Path:
+        return self.agents_dir / name / "agent.json"
+
+    def agent_memory_file(self, name: str) -> Path:
+        return self.agents_dir / name / "memory.md"
+
+    def agent_invoke_file(self, name: str) -> Path:
+        return self.agents_dir / name / "invoke.py"
 
     @property
     def agent_cmd(self) -> str:
@@ -70,17 +80,15 @@ class Config:
             self.state_dir,
             self.short_term_dir,
             self.channels_dir,
+            self.agents_dir,
             self.logs_dir,
             self.tools_dir,
         ):
             d.mkdir(parents=True, exist_ok=True)
 
-    def ensure_memory(self):
-        if not self.memory_file.exists():
-            self.memory_file.write_text(MEMORY_TEMPLATE)
-
     def initialize(self):
         self.ensure_dirs()
-        self.ensure_memory()
         if not self.channels_meta.exists():
             self.channels_meta.write_text("[]")
+        if not self.agents_meta.exists():
+            self.agents_meta.write_text("[]")
