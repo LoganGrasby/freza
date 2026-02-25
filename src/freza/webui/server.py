@@ -10,8 +10,9 @@ import sys
 import time
 import uuid
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
 from pathlib import Path
-from threading import Thread
+from threading import Lock, Thread
 from urllib.parse import urlparse, parse_qs
 
 from freza.config import Config
@@ -43,6 +44,7 @@ def _list_logs(limit=50, offset=0):
             results.append({
                 "id": data.get("instance_id", f.stem),
                 "mode": data.get("mode"),
+                "agent": data.get("agent_name"),
                 "channel": data.get("channel_name"),
                 "trigger": (data.get("trigger_message") or "")[:200],
                 "response": (data.get("response") or "")[:300],
@@ -85,15 +87,25 @@ def _get_short_term():
     return results
 
 
-def _get_memory():
+def _get_memory(agent_name: str = "default"):
     try:
-        return _cfg().memory_file.read_text()
+        mem_file = _cfg().agent_memory_file(agent_name)
+        if mem_file.exists():
+            return mem_file.read_text()
+        return ""
     except Exception:
         return ""
 
 
 def _get_channels():
     data = _read_json(_cfg().channels_meta)
+    if isinstance(data, list):
+        return data
+    return []
+
+
+def _get_agents():
+    data = _read_json(_cfg().agents_meta)
     if isinstance(data, list):
         return data
     return []
@@ -127,9 +139,10 @@ def _get_system_stats():
 
 class AgentProcess:
 
-    def __init__(self, message: str, thread_id: str | None = None):
+    def __init__(self, message: str, thread_id: str | None = None, agent_name: str = "default"):
         self.message = message
         self.thread_id = thread_id
+        self.agent_name = agent_name
         self.process: subprocess.Popen | None = None
         self.output_chunks: list[str] = []
         self.done = False
@@ -139,7 +152,7 @@ class AgentProcess:
         env = os.environ.copy()
         env.pop("CLAUDECODE", None)
 
-        cmd = cfg.agent_cmd_argv + ["channel", "webui", self.message]
+        cmd = cfg.agent_cmd_argv + ["channel", "webui", self.message, "--agent", self.agent_name]
         if self.thread_id:
             cmd += ["--thread-id", self.thread_id]
         self.process = subprocess.Popen(
@@ -155,20 +168,20 @@ class AgentProcess:
         def _stdout_reader():
             try:
                 while True:
-                    chunk = self.process.stdout.read(64)
-                    if not chunk:
+                    line = self.process.stdout.readline()
+                    if not line:
                         break
-                    self.output_chunks.append(chunk)
+                    self.output_chunks.append(line)
             except Exception:
                 pass
 
         def _stderr_reader():
             try:
                 while True:
-                    chunk = self.process.stderr.read(256)
-                    if not chunk:
+                    line = self.process.stderr.readline()
+                    if not line:
                         break
-                    self.output_chunks.append(f"\n[stderr] {chunk}")
+                    self.output_chunks.append(f"\n[stderr] {line}")
             except Exception:
                 pass
 
@@ -189,6 +202,7 @@ class AgentProcess:
 
 
 _active_procs: dict[str, AgentProcess] = {}
+_proc_lock = Lock()
 _proc_counter = 0
 
 
@@ -264,9 +278,12 @@ class WebUIHandler(BaseHTTPRequestHandler):
         elif path == "/api/short-term":
             self._json_response(_get_short_term())
         elif path == "/api/memory":
-            self._json_response({"content": _get_memory()})
+            agent_name = params.get("agent", ["default"])[0]
+            self._json_response({"content": _get_memory(agent_name), "agent": agent_name})
         elif path == "/api/channels":
             self._json_response(_get_channels())
+        elif path == "/api/agents":
+            self._json_response(_get_agents())
 
         elif path.startswith("/api/stream/"):
             proc_id = path.split("/api/stream/")[1]
@@ -317,12 +334,14 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 return
 
             thread_id = data.get("thread_id") or uuid.uuid4().hex
+            agent_name = data.get("agent", "default")
 
             global _proc_counter
-            _proc_counter += 1
-            proc_id = f"proc_{_proc_counter}_{int(time.time())}"
+            with _proc_lock:
+                _proc_counter += 1
+                proc_id = f"proc_{_proc_counter}_{int(time.time())}"
 
-            proc = AgentProcess(message, thread_id=thread_id)
+            proc = AgentProcess(message, thread_id=thread_id, agent_name=agent_name)
             try:
                 proc.start()
             except FileNotFoundError as e:
@@ -333,14 +352,15 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 return
             _active_procs[proc_id] = proc
 
-            self._json_response({"proc_id": proc_id, "thread_id": thread_id, "status": "started"})
+            self._json_response({"proc_id": proc_id, "thread_id": thread_id, "agent": agent_name, "status": "started"})
 
         else:
             self._json_response({"error": "not found"}, 404)
 
 
-class ReusableHTTPServer(HTTPServer):
+class ReusableHTTPServer(ThreadingMixIn, HTTPServer):
     allow_reuse_address = True
+    daemon_threads = True
 
 
 def run(config: Config, host: str = "127.0.0.1", port: int = 7888):
