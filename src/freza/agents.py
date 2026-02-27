@@ -10,6 +10,21 @@ from typing import Any
 from freza.config import Config, MEMORY_TEMPLATE
 
 _NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$")
+DEFAULT_AGENT_NAME = "default"
+DEFAULT_AGENT_DESCRIPTION = "Default general-purpose agent"
+
+
+def is_valid_agent_name(name: str) -> bool:
+    return isinstance(name, str) and bool(_NAME_RE.fullmatch(name))
+
+
+def validate_agent_name(name: str) -> str:
+    if not is_valid_agent_name(name):
+        raise ValueError(
+            f"Invalid agent name '{name}': must be alphanumeric with hyphens/underscores only, "
+            f"starting with an alphanumeric character."
+        )
+    return name
 
 
 class AgentManager:
@@ -47,12 +62,33 @@ class AgentManager:
         except (json.JSONDecodeError, OSError):
             return None
 
-    def register(self, name: str, description: str, **extra):
-        if not _NAME_RE.match(name):
-            raise ValueError(
-                f"Invalid agent name '{name}': must be alphanumeric with hyphens/underscores only, "
-                f"starting with an alphanumeric character."
+    def ensure_default_agent(self):
+        default = self.get_agent(DEFAULT_AGENT_NAME)
+        if not default:
+            self.register(DEFAULT_AGENT_NAME, DEFAULT_AGENT_DESCRIPTION)
+            return
+
+        description = default.get("description", DEFAULT_AGENT_DESCRIPTION)
+        agent_dir = self.config.agent_dir(DEFAULT_AGENT_NAME)
+        agent_dir.mkdir(parents=True, exist_ok=True)
+
+        config_file = self.config.agent_config_file(DEFAULT_AGENT_NAME)
+        if not config_file.exists():
+            config_data = {"name": DEFAULT_AGENT_NAME, "description": description}
+            config_file.write_text(json.dumps(config_data, indent=2))
+
+        memory_file = self.config.agent_memory_file(DEFAULT_AGENT_NAME)
+        if not memory_file.exists():
+            desc_line = f"\n{description}" if description else ""
+            memory_file.write_text(
+                MEMORY_TEMPLATE.format(
+                    agent_name=DEFAULT_AGENT_NAME,
+                    description_line=desc_line,
+                )
             )
+
+    def register(self, name: str, description: str, **extra):
+        name = validate_agent_name(name)
 
         agents = self._read()
         found = False

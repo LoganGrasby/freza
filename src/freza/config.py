@@ -92,3 +92,7 @@ class Config:
             self.channels_meta.write_text("[]")
         if not self.agents_meta.exists():
             self.agents_meta.write_text("[]")
+
+        # Ensure the default agent always exists in initialize-only workspaces.
+        from freza.agents import AgentManager
+        AgentManager(self).ensure_default_agent()

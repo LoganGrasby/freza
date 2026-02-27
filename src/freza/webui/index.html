@@ -925,7 +925,7 @@ html, body {
 // ── State ──────────────────────────────────────────────────────────
 let streaming = false;
 let currentProcId = null;
-let currentThreadId = null;
+let threadIdsByAgent = new Map();
 
 // ── DOM Refs ───────────────────────────────────────────────────────
 const chatMessages = document.getElementById('chat-messages');
@@ -992,7 +992,8 @@ sendBtn.addEventListener('click', sendMessage);
 
 document.getElementById('new-chat-btn').addEventListener('click', () => {
   if (streaming) return;
-  currentThreadId = null;
+  const selectedAgent = agentSelect.value || 'default';
+  threadIdsByAgent.delete(selectedAgent);
   chatMessages.innerHTML = `
     <div class="welcome" id="welcome">
       <div class="welcome-icon">
@@ -1025,8 +1026,10 @@ async function sendMessage() {
 
   try {
     // Start agent
-    const reqBody = { message: text, agent: agentSelect.value };
-    if (currentThreadId) reqBody.thread_id = currentThreadId;
+    const selectedAgent = agentSelect.value || 'default';
+    const reqBody = { message: text, agent: selectedAgent };
+    const threadId = threadIdsByAgent.get(selectedAgent);
+    if (threadId) reqBody.thread_id = threadId;
 
     const res = await fetch('/api/chat', {
       method: 'POST',
@@ -1038,7 +1041,7 @@ async function sendMessage() {
     if (!data.proc_id) throw new Error('No proc_id returned');
 
     currentProcId = data.proc_id;
-    if (data.thread_id) currentThreadId = data.thread_id;
+    if (data.thread_id) threadIdsByAgent.set(selectedAgent, data.thread_id);
     setStatus('streaming', 'green');
 
     // Stream response via SSE

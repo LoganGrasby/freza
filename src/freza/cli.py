@@ -25,7 +25,7 @@ from freza.config import Config
 from freza.memory import MemoryManager
 from freza.registry import InstanceRegistry, InstanceInfo
 from freza.channels import ChannelManager
-from freza.agents import AgentManager
+from freza.agents import AgentManager, validate_agent_name
 from freza.llm import invoke_claude, LLMError, InvocationResult
 
 
@@ -245,8 +245,8 @@ def _atomic_write_log(path: Path, data: dict):
         raise
 
 
-def _find_session_for_thread(config: Config, thread_id: str) -> str | None:
-    """Find the session_id from the most recent log for a given thread."""
+def _find_session_for_thread(config: Config, thread_id: str, agent_name: str) -> str | None:
+    """Find the session_id from the most recent log for a given thread and agent."""
     log_files = sorted(
         config.logs_dir.glob("*.log"),
         key=lambda p: p.stat().st_mtime,
@@ -255,7 +255,11 @@ def _find_session_for_thread(config: Config, thread_id: str) -> str | None:
     for lf in log_files:
         try:
             data = json.loads(lf.read_text())
-            if data.get("thread_id") == thread_id and data.get("session_id"):
+            if (
+                data.get("thread_id") == thread_id
+                and data.get("agent_name") == agent_name
+                and data.get("session_id")
+            ):
                 return data["session_id"]
         except Exception:
             continue
@@ -307,17 +311,17 @@ async def do_invoke(
 ):
     _ensure_claude_cli()
     agents = AgentManager(config)
-    memory = MemoryManager(config, agent_name=agent_name)
     registry = InstanceRegistry(config)
     channels = ChannelManager(config)
 
-    # Resolve agent
+    agent_name = validate_agent_name(agent_name)
     agent_config = agents.get_agent_config(agent_name)
-    if not agent_config and agent_name != "default":
-        print(f"Warning: agent '{agent_name}' not found, falling back to 'default'")
-        agent_name = "default"
-        agent_config = agents.get_agent_config(agent_name)
-        memory = MemoryManager(config, agent_name=agent_name)
+    if not agent_config:
+        raise ValueError(
+            f"Unknown agent '{agent_name}'. Register it first with:\n"
+            f"  freza register-agent {agent_name} \"Description\""
+        )
+    memory = MemoryManager(config, agent_name=agent_name)
 
     instance = registry.register(
         mode=mode,
@@ -371,11 +375,14 @@ async def do_invoke(
                 config.agent_dir(agent_name),
                 config.base_dir,
             )
+            if mode == "channel" and result.response:
+                end = "" if result.response.endswith("\n") else "\n"
+                print(result.response, end=end, flush=True)
         else:
             # Look up prior session for multi-turn threads
             resume_session = None
             if thread_id:
-                resume_session = _find_session_for_thread(config, thread_id)
+                resume_session = _find_session_for_thread(config, thread_id, agent_name)
                 if resume_session:
                     print(f"[{instance.instance_id}] resuming thread {thread_id} "
                           f"(session={resume_session[:12]}...)")
@@ -482,10 +489,6 @@ def do_cleanup(config: Config):
 
 def do_init(config: Config):
     config.initialize()
-
-    # Register the default agent
-    agents = AgentManager(config)
-    agents.register("default", "Default general-purpose agent")
 
     # Auto-register the webui channel with default agent
     channels = ChannelManager(config)
@@ -701,7 +704,14 @@ def main():
                 prompt_val = Path(prompt_val[1:]).read_text()
             kwargs["system_prompt"] = prompt_val
         if args.default_agent is not None:
-            kwargs["default_agent"] = args.default_agent
+            default_agent = validate_agent_name(args.default_agent)
+            am = AgentManager(config)
+            if not am.get_agent_config(default_agent):
+                raise ValueError(
+                    f"Unknown default agent '{default_agent}'. Register it first with:\n"
+                    f"  freza register-agent {default_agent} \"Description\""
+                )
+            kwargs["default_agent"] = default_agent
         cm.register(args.name, args.description, **kwargs)
         print(f"Channel '{args.name}' registered.")
         if "system_prompt" in kwargs:
@@ -728,12 +738,16 @@ def main():
     elif args.command == "invoke":
         config.initialize()
         do_cleanup(config)
-        asyncio.run(do_invoke(
-            config, mode="invoke",
-            trigger_message=args.message,
-            thread_id=args.thread_id,
-            agent_name=args.agent_name,
-        ))
+        try:
+            asyncio.run(do_invoke(
+                config, mode="invoke",
+                trigger_message=args.message,
+                thread_id=args.thread_id,
+                agent_name=args.agent_name,
+            ))
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            raise SystemExit(2) from e
 
     elif args.command == "channel":
         config.initialize()
@@ -749,13 +763,17 @@ def main():
             else:
                 agent_name = "default"
 
-        asyncio.run(do_invoke(
-            config, mode="channel",
-            channel_name=args.channel_name,
-            trigger_message=args.message,
-            thread_id=args.thread_id,
-            agent_name=agent_name,
-        ))
+        try:
+            asyncio.run(do_invoke(
+                config, mode="channel",
+                channel_name=args.channel_name,
+                trigger_message=args.message,
+                thread_id=args.thread_id,
+                agent_name=agent_name,
+            ))
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            raise SystemExit(2) from e
 
     else:
         parser.print_help()

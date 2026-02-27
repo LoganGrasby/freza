@@ -15,6 +15,7 @@ from pathlib import Path
 from threading import Lock, Thread
 from urllib.parse import urlparse, parse_qs
 
+from freza.agents import DEFAULT_AGENT_NAME, is_valid_agent_name
 from freza.config import Config
 
 STATIC_DIR = Path(__file__).resolve().parent
@@ -109,6 +110,21 @@ def _get_agents():
     if isinstance(data, list):
         return data
     return []
+
+
+def _parse_agent_name(raw: str | None) -> str:
+    name = raw if isinstance(raw, str) else DEFAULT_AGENT_NAME
+    name = name.strip() or DEFAULT_AGENT_NAME
+    if not is_valid_agent_name(name):
+        raise ValueError(
+            f"Invalid agent name '{name}': must be alphanumeric with hyphens/underscores only, "
+            "starting with an alphanumeric character."
+        )
+    return name
+
+
+def _is_registered_agent(name: str) -> bool:
+    return any(a.get("name") == name for a in _get_agents())
 
 
 def _get_system_stats():
@@ -278,7 +294,14 @@ class WebUIHandler(BaseHTTPRequestHandler):
         elif path == "/api/short-term":
             self._json_response(_get_short_term())
         elif path == "/api/memory":
-            agent_name = params.get("agent", ["default"])[0]
+            try:
+                agent_name = _parse_agent_name(params.get("agent", [DEFAULT_AGENT_NAME])[0])
+            except ValueError as e:
+                self._json_response({"error": str(e)}, 400)
+                return
+            if not _is_registered_agent(agent_name):
+                self._json_response({"error": f"unknown agent '{agent_name}'"}, 404)
+                return
             self._json_response({"content": _get_memory(agent_name), "agent": agent_name})
         elif path == "/api/channels":
             self._json_response(_get_channels())
@@ -334,7 +357,14 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 return
 
             thread_id = data.get("thread_id") or uuid.uuid4().hex
-            agent_name = data.get("agent", "default")
+            try:
+                agent_name = _parse_agent_name(data.get("agent", DEFAULT_AGENT_NAME))
+            except ValueError as e:
+                self._json_response({"error": str(e)}, 400)
+                return
+            if not _is_registered_agent(agent_name):
+                self._json_response({"error": f"unknown agent '{agent_name}'"}, 404)
+                return
 
             global _proc_counter
             with _proc_lock:
