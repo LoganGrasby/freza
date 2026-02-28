@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import mimetypes
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -13,12 +15,53 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from pathlib import Path
 from threading import Lock, Thread
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, unquote
 
 from freza.agents import DEFAULT_AGENT_NAME, is_valid_agent_name
 from freza.config import Config
 
 STATIC_DIR = Path(__file__).resolve().parent
+DIST_DIR = STATIC_DIR / "dist"
+
+_FRONTEND_BUILD_MISSING_HTML = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>freza web ui</title>
+  <style>
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background: #0a0a0b;
+      color: #f0f0f2;
+      font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    .card {
+      max-width: 680px;
+      padding: 24px;
+      border: 1px solid #2a2a32;
+      border-radius: 12px;
+      background: #111113;
+    }
+    code {
+      background: #1a1a1e;
+      border-radius: 6px;
+      padding: 2px 6px;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>Frontend build not found</h2>
+    <p>Build the Vue UI before using the web interface:</p>
+    <p><code>cd webui/frontend && npm install && npm run build</code></p>
+  </div>
+</body>
+</html>
+"""
 
 _config: Config | None = None
 
@@ -153,6 +196,9 @@ def _get_system_stats():
     }
 
 
+_LOG_LINE_RE = re.compile(r"^\[[\da-f]+\] ")
+
+
 class AgentProcess:
 
     def __init__(self, message: str, thread_id: str | None = None, agent_name: str = "default"):
@@ -187,6 +233,8 @@ class AgentProcess:
                     line = self.process.stdout.readline()
                     if not line:
                         break
+                    if _LOG_LINE_RE.match(line):
+                        continue
                     self.output_chunks.append(line)
             except Exception:
                 pass
@@ -197,7 +245,6 @@ class AgentProcess:
                     line = self.process.stderr.readline()
                     if not line:
                         break
-                    self.output_chunks.append(f"\n[stderr] {line}")
             except Exception:
                 pass
 
@@ -234,21 +281,54 @@ class WebUIHandler(BaseHTTPRequestHandler):
 
     def _json_response(self, data, status=200):
         body = json.dumps(data, default=str).encode()
+        self._bytes_response(body, "application/json", status=status)
+
+    def _html_response(self, html: str):
+        self._bytes_response(html.encode("utf-8"), "text/html; charset=utf-8")
+
+    def _bytes_response(self, body: bytes, content_type: str, status=200):
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", content_type)
         self._cors_headers()
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
-    def _html_response(self, html: str):
-        body = html.encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self._cors_headers()
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+    def _serve_dist_file(self, rel_path: str) -> bool:
+        try:
+            dist_root = DIST_DIR.resolve()
+            target = (DIST_DIR / rel_path).resolve()
+            target.relative_to(dist_root)
+        except Exception:
+            return False
+
+        if not target.exists() or not target.is_file():
+            return False
+
+        content_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+        self._bytes_response(target.read_bytes(), content_type)
+        return True
+
+    def _serve_frontend(self, path: str):
+        index_path = DIST_DIR / "index.html"
+        if not index_path.exists():
+            self._html_response(_FRONTEND_BUILD_MISSING_HTML)
+            return
+
+        if path == "/" or path == "":
+            self._html_response(index_path.read_text(encoding="utf-8"))
+            return
+
+        rel_path = unquote(path.lstrip("/"))
+        if rel_path and self._serve_dist_file(rel_path):
+            return
+
+        # SPA fallback for client-side routes like /logs or /settings.
+        if "." not in Path(rel_path).name:
+            self._html_response(index_path.read_text(encoding="utf-8"))
+            return
+
+        self._json_response({"error": "not found"}, 404)
 
     def _sse_headers(self):
         self.send_response(200)
@@ -268,12 +348,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
         path = parsed.path.rstrip("/") or "/"
         params = parse_qs(parsed.query)
 
-        if path == "/" or path == "":
-            html_path = STATIC_DIR / "index.html"
-            if html_path.exists():
-                self._html_response(html_path.read_text())
-            else:
-                self._json_response({"error": "index.html not found"}, 404)
+        if not path.startswith("/api/"):
+            self._serve_frontend(path)
             return
 
         if path == "/api/stats":

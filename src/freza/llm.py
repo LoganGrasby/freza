@@ -37,7 +37,7 @@ def _tolerant_parse(data):
 
 _client.parse_message = _tolerant_parse
 
-MAX_CONTENT_LENGTH = int(os.environ.get("AGENT_LOG_MAX_CONTENT", 50_000))
+MAX_CONTENT_LENGTH = int(os.environ.get("AGENT_LOG_MAX_CONTENT", 500_000))
 
 
 def _truncate(text: str) -> tuple[str, dict]:

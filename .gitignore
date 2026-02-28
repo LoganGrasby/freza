@@ -3,8 +3,10 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 *.egg
-dist/
 build/
+# Ignore top-level dist but keep the webui build output
+/dist/
+!src/freza/webui/dist/
 
 # Virtual environments
 .venv/
