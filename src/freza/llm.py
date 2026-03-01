@@ -119,6 +119,23 @@ def _serialize_message(message) -> dict | None:
     return None
 
 
+def _tool_detail(name: str, input_data) -> str:
+    if not isinstance(input_data, dict):
+        return ""
+    if name in ("Read", "Write", "Edit"):
+        return input_data.get("file_path", "")
+    if name == "Bash":
+        cmd = input_data.get("command", "")
+        return (cmd[:80] + "...") if len(cmd) > 80 else cmd
+    if name in ("Glob", "Grep"):
+        return input_data.get("pattern", "")
+    if name == "WebSearch":
+        return input_data.get("query", "")
+    if name == "WebFetch":
+        return input_data.get("url", "")
+    return ""
+
+
 class LLMError(RuntimeError):
     pass
 
@@ -142,6 +159,7 @@ async def invoke_claude(
     model: str = "sonnet",
     max_turns: int = 50,
     on_text: Callable[[str], None] | None = None,
+    on_event: Callable[[dict], None] | None = None,
     resume: str | None = None,
 ) -> InvocationResult:
     options = ClaudeAgentOptions(
@@ -179,10 +197,35 @@ async def invoke_claude(
                             on_text(block.text)
                     elif isinstance(block, ToolUseBlock):
                         result.tools_used.append(block.name)
+                        if on_event:
+                            on_event({
+                                "type": "tool_use",
+                                "tool_id": block.id,
+                                "name": block.name,
+                                "detail": _tool_detail(block.name, block.input),
+                            })
+
+            elif isinstance(message, UserMessage):
+                if isinstance(message.content, list):
+                    for block in message.content:
+                        if isinstance(block, ToolResultBlock) and on_event:
+                            on_event({
+                                "type": "tool_result",
+                                "tool_id": block.tool_use_id,
+                                "is_error": block.is_error,
+                            })
 
             elif isinstance(message, ResultMessage):
                 result.cost_usd = message.total_cost_usd or 0.0
                 result.session_id = message.session_id
+                if on_event:
+                    on_event({
+                        "type": "result",
+                        "cost_usd": message.total_cost_usd or 0.0,
+                        "turns": result.turns,
+                        "duration_ms": message.duration_ms,
+                        "session_id": message.session_id,
+                    })
 
     except Exception as e:
         result.duration_seconds = time.monotonic() - start

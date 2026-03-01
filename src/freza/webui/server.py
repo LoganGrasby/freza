@@ -117,6 +117,60 @@ def _get_log_detail(filename: str):
         return None
 
 
+def _list_threads():
+    cfg = _cfg()
+    if not cfg.logs_dir.exists():
+        return []
+    threads = {}
+    for f in cfg.logs_dir.glob("*.log"):
+        try:
+            data = json.loads(f.read_text())
+        except Exception:
+            continue
+        tid = data.get("thread_id") or data.get("instance_id", f.stem)
+        trigger = (data.get("trigger_message") or "")[:200]
+        ts = data.get("timestamp", 0)
+        if tid not in threads:
+            threads[tid] = {
+                "thread_id": tid,
+                "title": trigger or "(no message)",
+                "agent": data.get("agent_name", "default"),
+                "channel": data.get("channel_name", ""),
+                "mode": data.get("mode", ""),
+                "last_timestamp": ts,
+                "message_count": 0,
+            }
+        threads[tid]["message_count"] += 1
+        if ts > threads[tid]["last_timestamp"]:
+            threads[tid]["last_timestamp"] = ts
+    return sorted(threads.values(), key=lambda t: t["last_timestamp"], reverse=True)
+
+
+def _get_thread(thread_id: str):
+    cfg = _cfg()
+    entries = []
+    for f in cfg.logs_dir.glob("*.log"):
+        try:
+            data = json.loads(f.read_text())
+        except Exception:
+            continue
+        tid = data.get("thread_id") or data.get("instance_id", f.stem)
+        if tid == thread_id:
+            entries.append({
+                "trigger_message": data.get("trigger_message", ""),
+                "response": data.get("response", ""),
+                "timestamp": data.get("timestamp", 0),
+                "agent": data.get("agent_name", "default"),
+                "channel": data.get("channel_name", ""),
+                "cost_usd": data.get("cost_usd", 0),
+                "duration_seconds": data.get("duration_seconds", 0),
+                "turns": data.get("turns", 0),
+                "tools_used": data.get("tools_used", []),
+            })
+    entries.sort(key=lambda e: e["timestamp"])
+    return entries
+
+
 def _get_instances():
     data = _read_json(_cfg().registry_file)
     if isinstance(data, list):
@@ -200,6 +254,7 @@ def _get_system_stats():
 
 
 _LOG_LINE_RE = re.compile(r"^\[[\da-f]+\] ")
+_EVENT_PREFIX = "\x1e"
 
 
 class AgentProcess:
@@ -209,7 +264,7 @@ class AgentProcess:
         self.thread_id = thread_id
         self.agent_name = agent_name
         self.process: subprocess.Popen | None = None
-        self.output_chunks: list[str] = []
+        self.output_chunks: list[dict] = []
         self.done = False
 
     def start(self):
@@ -238,7 +293,15 @@ class AgentProcess:
                         break
                     if _LOG_LINE_RE.match(line):
                         continue
-                    self.output_chunks.append(line)
+                    if line.startswith(_EVENT_PREFIX):
+                        try:
+                            event = json.loads(line[1:])
+                            event["kind"] = "event"
+                            self.output_chunks.append(event)
+                        except json.JSONDecodeError:
+                            self.output_chunks.append({"kind": "text", "text": line})
+                    else:
+                        self.output_chunks.append({"kind": "text", "text": line})
             except Exception:
                 pass
 
@@ -263,8 +326,8 @@ class AgentProcess:
 
         Thread(target=_waiter, daemon=True).start()
 
-    def get_new_output(self, from_idx=0):
-        return "".join(self.output_chunks[from_idx:]), len(self.output_chunks)
+    def get_new_chunks(self, from_idx=0):
+        return self.output_chunks[from_idx:], len(self.output_chunks)
 
 
 _active_procs: dict[str, AgentProcess] = {}
@@ -389,6 +452,12 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 self._json_response(detail)
             else:
                 self._json_response({"error": "not found"}, 404)
+        elif path == "/api/threads":
+            self._json_response(_list_threads())
+        elif path.startswith("/api/threads/"):
+            tid = path.split("/api/threads/")[1]
+            entries = _get_thread(tid)
+            self._json_response(entries)
         elif path == "/api/instances":
             self._json_response(_get_instances())
         elif path == "/api/short-term":
@@ -419,10 +488,14 @@ class WebUIHandler(BaseHTTPRequestHandler):
             idx = 0
             try:
                 while True:
-                    text, new_idx = proc.get_new_output(idx)
-                    if text:
-                        for line in f"data: {json.dumps({'text': text})}\n\n".encode().splitlines(True):
-                            self.wfile.write(line)
+                    chunks, new_idx = proc.get_new_chunks(idx)
+                    if chunks:
+                        for chunk in chunks:
+                            if chunk["kind"] == "text":
+                                payload = {"text": chunk["text"]}
+                            else:
+                                payload = {k: v for k, v in chunk.items() if k != "kind"}
+                            self.wfile.write(f"data: {json.dumps(payload)}\n\n".encode())
                         self.wfile.flush()
                         idx = new_idx
                     elif proc.done:

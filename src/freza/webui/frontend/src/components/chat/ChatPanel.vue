@@ -10,7 +10,7 @@ const props = defineProps({
   },
 })
 
-const emit = defineEmits(['update:selectedAgent'])
+const emit = defineEmits(['update:selectedAgent', 'thread-changed'])
 
 const agents = ref([])
 const streaming = ref(false)
@@ -34,6 +34,7 @@ function makeMessage(role, text) {
     id: `${role}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
     role,
     text,
+    blocks: [],
     time: Date.now(),
   }
 }
@@ -84,8 +85,35 @@ function handleNewChat() {
   messages.value = []
   inputText.value = ''
   resizeInput()
+  emit('thread-changed', null)
   nextTick(() => chatInput.value?.focus())
 }
+
+async function loadThread(threadId, agentName) {
+  if (streaming.value) return
+  try {
+    const entries = await getJson(`/api/threads/${threadId}`)
+    if (!entries.length) return
+    messages.value = []
+    const agent = agentName || entries[0].agent || 'default'
+    selectedAgentModel.value = agent
+    threadIdsByAgent.set(agent, threadId)
+    for (const entry of entries) {
+      if (entry.trigger_message) {
+        messages.value.push(makeMessage('user', entry.trigger_message))
+      }
+      if (entry.response) {
+        messages.value.push(makeMessage('agent', entry.response))
+      }
+    }
+    scrollToBottom()
+    nextTick(() => chatInput.value?.focus())
+  } catch {
+    // silently fail
+  }
+}
+
+defineExpose({ loadThread, handleNewChat })
 
 function finishStreaming() {
   streaming.value = false
@@ -95,6 +123,10 @@ function finishStreaming() {
     currentStream.close()
     currentStream = null
   }
+
+  const agent = selectedAgentModel.value || 'default'
+  const threadId = threadIdsByAgent.get(agent)
+  emit('thread-changed', threadId || null)
 }
 
 function handleInputKeydown(event) {
@@ -146,14 +178,16 @@ async function sendMessage() {
     setStatus('streaming', 'green')
 
     let fullText = ''
+    let blockText = ''
     currentStream = new EventSource(sseUrl(`/api/stream/${chatStart.proc_id}`))
 
     currentStream.onmessage = (event) => {
       const payload = JSON.parse(event.data)
+      const msg = messages.value[agentIdx]
 
       if (payload.done) {
         if (!fullText.trim()) {
-          messages.value[agentIdx].text = '(Agent completed with no text output)'
+          msg.text = '(Agent completed with no text output)'
         }
         finishStreaming()
         return
@@ -161,7 +195,42 @@ async function sendMessage() {
 
       if (payload.text) {
         fullText += payload.text
-        messages.value[agentIdx].text = fullText
+        blockText += payload.text
+        msg.text = fullText
+        const lastBlock = msg.blocks[msg.blocks.length - 1]
+        if (lastBlock && lastBlock.kind === 'text') {
+          lastBlock.text = blockText
+        } else {
+          msg.blocks.push({ kind: 'text', text: blockText })
+        }
+        scrollToBottom()
+      } else if (payload.type === 'tool_use') {
+        blockText = ''
+        msg.blocks.push({
+          kind: 'tool',
+          toolId: payload.tool_id,
+          name: payload.name,
+          detail: payload.detail || '',
+          status: 'running',
+        })
+        setStatus(payload.name, 'amber')
+        scrollToBottom()
+      } else if (payload.type === 'tool_result') {
+        const tool = msg.blocks.find(
+          (b) => b.kind === 'tool' && b.toolId === payload.tool_id
+        )
+        if (tool) {
+          tool.status = payload.is_error ? 'error' : 'done'
+        }
+        setStatus('streaming', 'green')
+        scrollToBottom()
+      } else if (payload.type === 'result') {
+        msg.blocks.push({
+          kind: 'result',
+          cost_usd: payload.cost_usd,
+          turns: payload.turns,
+          duration_ms: payload.duration_ms,
+        })
         scrollToBottom()
       }
     }

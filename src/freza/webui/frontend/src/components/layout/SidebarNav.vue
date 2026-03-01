@@ -4,9 +4,13 @@ const props = defineProps({
     type: String,
     required: true,
   },
+  historyVisible: {
+    type: Boolean,
+    default: true,
+  },
 })
 
-const emit = defineEmits(['update:currentPanel', 'settings'])
+const emit = defineEmits(['update:currentPanel', 'settings', 'toggle-history'])
 
 function setPanel(panel) {
   emit('update:currentPanel', panel)
@@ -66,6 +70,29 @@ function setPanel(panel) {
         stroke-linejoin="round"
       >
         <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+      </svg>
+    </button>
+
+    <button
+      type="button"
+      class="flex h-10 w-10 items-center justify-center rounded-[10px] text-[var(--text-2)] transition hover:bg-[var(--bg-3)] hover:text-[var(--text-1)]"
+      :class="{ 'text-[var(--text-0)]': props.historyVisible && props.currentPanel === 'chat' }"
+      title="Toggle history"
+      @click="emit('toggle-history')"
+    >
+      <svg
+        class="h-5 w-5"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+      >
+        <rect x="3" y="3" width="7" height="7" />
+        <rect x="14" y="3" width="7" height="7" />
+        <rect x="3" y="14" width="7" height="7" />
+        <rect x="14" y="14" width="7" height="7" />
       </svg>
     </button>
 

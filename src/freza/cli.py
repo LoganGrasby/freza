@@ -391,9 +391,13 @@ async def do_invoke(
                   f"max_turns={config.max_turns})...")
 
             stream_text = None
+            stream_event = None
             if mode == "channel":
                 def stream_text(text: str) -> None:
                     print(text, end="", flush=True)
+
+                def stream_event(event: dict) -> None:
+                    print(f"\x1e{json.dumps(event, default=str)}", flush=True)
 
             result = await invoke_claude(
                 prompt=user,
@@ -402,6 +406,7 @@ async def do_invoke(
                 model=config.model,
                 max_turns=config.max_turns,
                 on_text=stream_text,
+                on_event=stream_event,
                 resume=resume_session,
             )
 
