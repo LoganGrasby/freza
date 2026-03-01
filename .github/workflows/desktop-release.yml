@@ -58,7 +58,11 @@ jobs:
         with:
           workspaces: desktop/src-tauri -> target
 
-      - name: Install frontend dependencies
+      - name: Install shared frontend dependencies
+        working-directory: src/freza/webui/frontend
+        run: npm install
+
+      - name: Install desktop dependencies
         working-directory: desktop
         run: npm install
 
