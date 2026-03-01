@@ -19,7 +19,7 @@ jobs:
             target: aarch64-apple-darwin
             bundles: dmg
             label: macOS-arm64
-          - platform: macos-13
+          - platform: macos-latest
             target: x86_64-apple-darwin
             bundles: dmg
             label: macOS-x86_64
@@ -61,6 +61,10 @@ jobs:
       - name: Install frontend dependencies
         working-directory: desktop
         run: npm install
+
+      - name: Build frontend
+        working-directory: desktop
+        run: npm run build
 
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
