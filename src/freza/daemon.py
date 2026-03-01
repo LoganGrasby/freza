@@ -61,7 +61,7 @@ def stop_daemon(config: Config) -> bool:
     return True
 
 
-def daemonize(config: Config, host: str = "127.0.0.1", port: int = 7888) -> int:
+def daemonize(config: Config, host: str = "127.0.0.1", port: int = 7888, token: str | None = None) -> int:
     """Double-fork to start the webui as a background daemon.
 
     Returns the daemon PID. The caller continues normally.
@@ -114,7 +114,7 @@ def daemonize(config: Config, host: str = "127.0.0.1", port: int = 7888) -> int:
     # Run the server (blocks forever in the daemon)
     from freza.webui.server import run as run_webui
     try:
-        run_webui(config, host=host, port=port)
+        run_webui(config, host=host, port=port, token=token)
     finally:
         pid_file.unlink(missing_ok=True)
     os._exit(0)

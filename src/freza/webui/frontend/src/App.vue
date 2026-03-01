@@ -4,6 +4,8 @@ import SidebarNav from '@/components/layout/SidebarNav.vue'
 import ChatPanel from '@/components/chat/ChatPanel.vue'
 import DiagnosticsPanel from '@/components/diagnostics/DiagnosticsPanel.vue'
 
+const emit = defineEmits(['settings'])
+
 const currentPanel = ref('chat')
 const selectedAgent = ref('default')
 </script>
@@ -13,6 +15,7 @@ const selectedAgent = ref('default')
     <SidebarNav
       :current-panel="currentPanel"
       @update:current-panel="(panel) => (currentPanel = panel)"
+      @settings="emit('settings')"
     />
 
     <ChatPanel

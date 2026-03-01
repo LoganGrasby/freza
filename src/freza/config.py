@@ -2,6 +2,7 @@
 
 import os
 import platform
+import secrets
 import sys
 from pathlib import Path
 
@@ -47,6 +48,7 @@ class Config:
         self.tools_dir = self.base_dir / "tools"
         self.webui_pid_file = self.state_dir / "webui.pid"
         self.webui_log_file = self.state_dir / "webui.log"
+        self.webui_token_file = self.state_dir / "webui.token"
 
         self.heartbeat_interval = int(os.environ.get("AGENT_HEARTBEAT_SEC", "30"))
         self.stale_threshold = int(os.environ.get("AGENT_STALE_SEC", "300"))
@@ -66,6 +68,16 @@ class Config:
 
     def agent_invoke_file(self, name: str) -> Path:
         return self.agents_dir / name / "invoke.py"
+
+    def webui_token(self, generate: bool = False) -> str | None:
+        if generate and not self.webui_token_file.exists():
+            token = secrets.token_urlsafe(32)
+            self.webui_token_file.write_text(token)
+            self.webui_token_file.chmod(0o600)
+            return token
+        if self.webui_token_file.exists():
+            return self.webui_token_file.read_text().strip()
+        return None
 
     @property
     def agent_cmd(self) -> str:

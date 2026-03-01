@@ -638,6 +638,7 @@ def main():
     ui.add_argument("--daemon", action="store_true", help="Run as background daemon")
     ui.add_argument("--stop", action="store_true", help="Stop the running daemon")
     ui.add_argument("--status", action="store_true", help="Check if daemon is running")
+    ui.add_argument("--generate-token", action="store_true", help="Generate a new API token for remote access")
 
     sub.add_parser("status", help="Show status")
     sub.add_parser("cleanup", help="Prune stale state")
@@ -666,6 +667,12 @@ def main():
         config.initialize()
         from freza.daemon import daemonize, stop_daemon, is_running
 
+        if args.generate_token:
+            token = config.webui_token(generate=True)
+            print(f"API token: {token}")
+            print(f"Stored in: {config.webui_token_file}")
+            return
+
         if args.stop:
             if stop_daemon(config):
                 print("WebUI daemon stopped.")
@@ -678,13 +685,15 @@ def main():
             else:
                 print("WebUI daemon is not running.")
         elif args.daemon:
-            pid = daemonize(config, host=args.host, port=args.port)
+            token = config.webui_token()
+            pid = daemonize(config, host=args.host, port=args.port, token=token)
             print(f"WebUI daemon started (PID {pid})")
             print(f"  http://{args.host}:{args.port}")
             print(f"  Log: {config.webui_log_file}")
         else:
             from freza.webui.server import run as run_webui
-            run_webui(config, host=args.host, port=args.port)
+            token = config.webui_token()
+            run_webui(config, host=args.host, port=args.port, token=token)
 
     elif args.command == "status":
         do_status(config)

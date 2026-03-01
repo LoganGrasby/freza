@@ -1,7 +1,7 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import ChatMessage from '@/components/chat/ChatMessage.vue'
-import { getJson, postJson } from '@/lib/api'
+import { getJson, postJson, sseUrl } from '@/lib/api'
 
 const props = defineProps({
   selectedAgent: {
@@ -146,7 +146,7 @@ async function sendMessage() {
     setStatus('streaming', 'green')
 
     let fullText = ''
-    currentStream = new EventSource(`/api/stream/${chatStart.proc_id}`)
+    currentStream = new EventSource(sseUrl(`/api/stream/${chatStart.proc_id}`))
 
     currentStream.onmessage = (event) => {
       const payload = JSON.parse(event.data)

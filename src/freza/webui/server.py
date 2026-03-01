@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import json
 import mimetypes
 import os
@@ -64,6 +65,8 @@ _FRONTEND_BUILD_MISSING_HTML = """<!doctype html>
 """
 
 _config: Config | None = None
+_auth_required: bool = False
+_auth_token: str | None = None
 
 
 def _cfg() -> Config:
@@ -274,10 +277,26 @@ class WebUIHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
+    def _check_auth(self) -> bool:
+        if not _auth_required or not _auth_token:
+            return True
+        token = None
+        auth_header = self.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+        if not token:
+            parsed = urlparse(self.path)
+            params = parse_qs(parsed.query)
+            token = params.get("token", [None])[0]
+        if token and hmac.compare_digest(token, _auth_token):
+            return True
+        self._json_response({"error": "unauthorized"}, 401)
+        return False
+
     def _cors_headers(self):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
     def _json_response(self, data, status=200):
         body = json.dumps(data, default=str).encode()
@@ -352,7 +371,12 @@ class WebUIHandler(BaseHTTPRequestHandler):
             self._serve_frontend(path)
             return
 
-        if path == "/api/stats":
+        if not self._check_auth():
+            return
+
+        if path == "/api/ping":
+            self._json_response({"status": "ok"})
+        elif path == "/api/stats":
             self._json_response(_get_system_stats())
         elif path == "/api/logs":
             limit = int(params.get("limit", [50])[0])
@@ -418,6 +442,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/")
 
+        if not self._check_auth():
+            return
+
         if path == "/api/chat":
             content_length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(content_length)
@@ -469,9 +496,11 @@ class ReusableHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
 
 
-def run(config: Config, host: str = "127.0.0.1", port: int = 7888):
-    global _config
+def run(config: Config, host: str = "127.0.0.1", port: int = 7888, token: str | None = None):
+    global _config, _auth_required, _auth_token
     _config = config
+    _auth_token = token
+    _auth_required = bool(token) and host != "127.0.0.1"
 
     server = ReusableHTTPServer((host, port), WebUIHandler)
     ts = time.strftime("%Y-%m-%d %H:%M:%S")

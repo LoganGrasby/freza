@@ -1,0 +1,5 @@
+/* Tell Tailwind v4 to scan the shared frontend components */
+@source "../../src/freza/webui/frontend/src";
+
+/* Import the shared styles (variables, prose, animations, etc.) */
+@import "@/style.css";

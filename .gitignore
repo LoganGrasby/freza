@@ -27,3 +27,8 @@ build/
 state/
 channels/
 tools/
+
+# Desktop app build artifacts
+desktop/dist/
+desktop/src-tauri/target/
+desktop/node_modules/
